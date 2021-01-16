@@ -1,57 +1,162 @@
 import numpy as np
 import scipy
-
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import spsolve
+from collections import Iterable
 '''
 The finite difference code for the neutron diffusion equation
 Wei Xiao
-xiaowei810@foxmail.com
+bearsanxw@gmail.com
 Only for the test of transient algorithms
+2021-1-16
 '''
+class material_FDM:
+    def __init__(self,mat_id):
+        self.__id = mat_id
+        self.__XS_name = ['XS_scatter','XS_fission_spectrum','XS_absorption','Diffusion_coef','XS_nu_fission']
+        self.__XS = {}
+        for name in self.__XS_name:
+            self.__XS[name] = None
+    def check_id(self):
+        return self.__id
+    def check_XS(self):
+        print('Material {}'.format(self.__id))
+        for name in self.__XS_name:
+            print('{}:'.format(name))
+            print(self.__XS[name])
+    def set_XS(self,name,XS):
+        if name not in self.__XS_name:
+            print('Name error. There is no such name as {}'.format(name))
+        else:
+            self.__XS[name] = XS
+    def get_XS(self,name):
+        return self.__XS[name]
 
-class diffusion_FDM:
-    def __init__(self):
-        # self.__mat_col = 1
-        # self.__mat_row = 1
-        # self.__flux_col = 1
-        # self.__flux_row = 1
+class geometry_FDM:
+    def __init__(self,x_block,y_block):
+        self.x_block = x_block
+        self.y_block = y_block
+        self.__mat_block = np.zeros((x_block,y_block),dtype=np.int32)
+        self.x_dim = None
+        self.y_dim = None
+        self.x_size = None
+        self.y_size = None
+    
+    def set_block_mat(self,mat,row,col):
+        self.__mat_block[row,col] = mat.check_id()
+    
+    def set_block_size(self,x_size,y_size):
+        if len(x_size)==self.x_block and len(y_size)==self.y_block:
+            self.x_size = x_size
+            self.y_size = y_size
+        else:
+            print('The number of block size is inconsistent with blocks layout')
+    
+    def set_discretized_num(self,x_dim,y_dim):
+        if len(x_dim)==self.x_block and len(y_dim)==self.y_block:
+            self.x_dim = x_dim
+            self.y_dim = y_dim
+        else:
+            print('The number of discretized blocks is inconsistent with blocks layout')
+
+    def check_blocks(self):
+        print('Material layout:')
+        print(self.__mat_block)
+        print('Block size:')
+        print('x:{}'.format(self.x_size))
+        print('y:{}'.format(self.y_size))
+        print('Discretization number:')
+        print('x:{}'.format(self.x_dim))
+        print('y:{}'.format(self.y_dim))
+
+    def get_block_mat(self,row,col):
+        return self.__mat_block[row,col]
+
+        
+
+class solver_FDM:
+    def __init__(self,group_num):
+        self.__group_num = group_num
+        self.__XS_ls = {}
 
         self.__boundary = {}
         self.__boundary_beta = {}
 
-        #TODO
-        #TEST
-        # M1
-        XS_scatter = [[0,0.01],[0,0]]
-        XS_fission_spec = [1.0,0.0]
-        XS_g1 = [1.4,0.01,0.007,XS_scatter[0],XS_fission_spec[0]]
-        XS_g2 = [0.4,0.15,0.2,XS_scatter[1],XS_fission_spec[1]]
-        XS_M1 = [XS_g1,XS_g2]
-        # M2
-        XS_scatter = [[0,0.01],[0,0]]
-        XS_fission_spec = [1.0,0.0]
-        XS_g1 = [1.4,0.01,0.007,XS_scatter[0],XS_fission_spec[0]]
-        XS_g2 = [0.4,0.15,0.2,XS_scatter[1],XS_fission_spec[1]]
-        XS_M2 = [XS_g1,XS_g2]
-        # M3
-        XS_scatter = [[0,0.01],[0,0]]
-        XS_fission_spec = [1.0,0.0]
-        XS_g1 = [1.3,0.008,0.003,XS_scatter[0],XS_fission_spec[0]]
-        XS_g2 = [0.5,0.05,0.06,XS_scatter[1],XS_fission_spec[1]]
-        XS_M3 = [XS_g1,XS_g2]
-        # XS
-        self.__XS_ls = [XS_M1,XS_M2,XS_M3]
+        self.boundary_set('left','reflective',1)
+        self.boundary_set('bottom','reflective',1)
+        self.boundary_set('right','vaccuum')
+        self.boundary_set('top','vaccuum')
 
-        self.__group_num = 2 
-        self.__mat_col = 2
-        self.__mat_row = 2
-        self.__flux_row = 3
-        self.__flux_col = 3
+        # self.__group_num = 2 
         
-        self.__define_mat_m()
-        self.__define_geo_m_x()
-        self.__define_geo_m_y()
-        self.__initial_flux()
+        # self.__define_geo_m_x()
+        # self.__define_geo_m_y()
 
+    def add_material(self,material):
+        if isinstance(material, Iterable):
+            for mat in material:
+                if mat.check_id() not in self.__XS_ls:
+                    XS = self.__to_XS(mat)
+                    self.__XS_ls[mat.check_id()] = XS
+                else:
+                    print('Material {} has existed'.format(mat.check_id()))
+        else:
+            if material.check_id() not in self.__XS_ls:
+                XS = self.__to_XS(material)
+                self.__XS_ls[material.check_id()] = XS
+            else:
+                print('Material {} has existed'.format(material.check_id()))
+    
+    def update_material(self,mat_id,material):
+        if mat_id in self.__XS_ls:
+            XS = self.__to_XS(material)
+            self.__XS_ls[mat_id] = XS
+        else:
+            print('There is no material {}'.format(mat_id))
+    
+    def __to_XS(self,material):
+        XS = [None]*self.__group_num
+        for group in range(self.__group_num):
+            XS_group = [None]*5
+            XS_group[0] = material.get_XS('Diffusion_coef')[group]
+            XS_group[1] = material.get_XS('XS_absorption')[group]
+            XS_group[2] = material.get_XS('XS_nu_fission')[group]
+            XS_group[3] = material.get_XS('XS_scatter')[group]
+            XS_group[4] = material.get_XS('XS_fission_spectrum')[group]
+            XS[group] = XS_group
+        return XS
+
+    def set_geometry(self,geo):
+
+        # Initial row and column number
+        # row (x)
+        self.__mat_row = 0
+        self.__x_mat_index = [0]*(geo.x_block+1)
+        for i,x_dim in enumerate(geo.x_dim):
+            self.__mat_row += x_dim
+            if i==0:
+                self.__x_mat_index[i+1] = x_dim
+            else:
+                self.__x_mat_index[i+1] = x_dim+self.__x_mat_index[i]
+        
+        # column (y)
+        self.__mat_col = 0
+        self.__y_mat_index = [0]*(geo.y_block+1)
+        for i,y_dim in enumerate(geo.y_dim):
+            self.__mat_col += y_dim
+            if i==0:
+                self.__y_mat_index[i+1] = y_dim
+            else:
+                self.__y_mat_index[i+1] = y_dim+self.__y_mat_index[i]
+
+        self.__flux_row = self.__mat_row+1
+        self.__flux_col = self.__mat_col+1    
+
+        # Initial material layout
+        self.__define_mat_m(geo)
+        self.__define_geo_m_x(geo)
+        self.__define_geo_m_y(geo)
+        np.savetxt('material_layout.asu',self.mat_m,fmt="%i")
 
     def __v2m(self,v_i):
         m_j = v_i//self.__flux_row
@@ -63,21 +168,26 @@ class diffusion_FDM:
 
     # Material list
     # 1st: material; 2nd: group; 3rd: XS: Dg, Σag, vΣfg, Σs, χ
-    def __define_mat_m(self):
+    def __define_mat_m(self,geo):
         self.mat_m = np.zeros((self.__mat_row,self.__mat_col),dtype=np.int32)
-        self.mat_m[0,0] = 0
-        self.mat_m[1,0] = 1
-        self.mat_m[0,1] = 1
-        self.mat_m[1,1] = 2
+        for j in range(geo.y_block):
+            for i in range(geo.x_block):
+                self.mat_m[self.__x_mat_index[i]:self.__x_mat_index[i+1],
+                self.__y_mat_index[j]:self.__y_mat_index[j+1]] = geo.get_block_mat(i,j)
+
 
     #TODO
-    def __define_geo_m_x(self):
+    def __define_geo_m_x(self,geo):
         # self.geo_m_x = np.ones(self.__mat_row)
-        self.geo_m_x = np.array([1,2])
+        self.geo_m_x = np.zeros(self.__mat_row)
+        for i in range(geo.x_block):
+            self.geo_m_x[self.__x_mat_index[i]:self.__x_mat_index[i+1]] = geo.x_size[i]/geo.x_dim[i]
     
-    def __define_geo_m_y(self):
+    def __define_geo_m_y(self,geo):
         # self.geo_m_y = np.ones(self.__mat_col)
-        self.geo_m_y = np.array([2,1])
+        self.geo_m_y = np.zeros(self.__mat_col)
+        for i in range(geo.y_block):
+            self.geo_m_y[self.__y_mat_index[i]:self.__y_mat_index[i+1]] = geo.y_size[i]/geo.y_dim[i]
 
     def __initial_flux(self):
         # Initial flux storage
@@ -91,6 +201,7 @@ class diffusion_FDM:
             self.__boundary_beta[loc] = beta
         else:
             self.__boundary[loc]=1
+
     def print_boundary(self):
         print('Boundary type')
         print(self.__boundary)
@@ -157,6 +268,7 @@ class diffusion_FDM:
                         self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
                             self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1])   
         np.savetxt('absorp_op.asu',absorp_op)
+        return absorp_op
     def define_diffus_operator(self,group):
         # Validated 2021-1-14
         diffus_op = np.zeros((self.__flux_row*self.__flux_col,self.__flux_row*self.__flux_col))
@@ -284,6 +396,7 @@ class diffusion_FDM:
                     diffus_op[v_i,v_i_bottom] += 0.5*(self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_x[i]+\
                         self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_x[i-1])/self.geo_m_y[j-1]
         np.savetxt('diffus_op.asu',diffus_op)
+        return diffus_op
     def define_scattering_term(self,group_in):
         # Validated 2021-1-14
         scatter_term = np.zeros(self.__flux_col*self.__flux_row)
@@ -346,8 +459,10 @@ class diffusion_FDM:
                             self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
                                 self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
                                     self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in])  
-        np.savetxt('scattering_term.asu',scatter_term)
+        # np.savetxt('scattering_term.asu',scatter_term)
+        return scatter_term
     def define_fission_term(self,group_in):
+        # Validated 2021-1-14
         fission_term = np.zeros(self.__flux_col*self.__flux_row)
         for group_out in range(self.__group_num):
             group_flux = self.__flux[group_out]
@@ -407,4 +522,360 @@ class diffusion_FDM:
                         self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
                             self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
                                 self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4])  
-        np.savetxt('fission_term.asu',fission_term)
+        return fission_term
+
+    def define_absorp_operator_sparse(self,group):
+        # Validated 2021-1-14
+        __row = np.zeros(self.__flux_col*self.__flux_row,dtype=np.int32)
+        __col = np.zeros(self.__flux_col*self.__flux_row,dtype=np.int32)
+        __data = np.zeros(self.__flux_col*self.__flux_row)
+        k = 0
+        for i in range(self.__flux_row):
+            for j in range(self.__flux_col):
+                v_i = self.__m2v(i,j)
+                __row[k] = v_i
+                __col[k] = v_i
+                # left-bottom
+                if i==0 and j==0:
+                    __data[k] = 0.25*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                    self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                        self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                            self.__boundary['left']*self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1])
+                # left-top
+                elif i==0 and j==self.__flux_col-1:
+                    __data[k] = 0.25*(self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
+                    self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
+                        self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
+                            self.__boundary['left']*self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]) 
+                # right-bottom               
+                elif i==self.__flux_row-1 and j==0:
+                    __data[k] = 0.25*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                    self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                        self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                            self.__boundary['right']*self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1])   
+                # right-top
+                elif i==self.__flux_row-1 and j==self.__flux_col-1:
+                    __data[k] = 0.25*(self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]+\
+                    self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]+\
+                        self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]+\
+                            self.__boundary['right']*self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]) 
+                # left
+                elif i==0 and j>0 and j<self.__flux_col-1:
+                    __data[k] = 0.25*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                    self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
+                        self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                            self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]) 
+                # top
+                elif i>0 and i<self.__flux_row-1 and j==self.__flux_col-1:
+                    __data[k] = 0.25*(self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
+                    self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]+\
+                        self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]+\
+                            self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1])         
+                # right
+                elif i==self.__flux_row-1 and j>0 and j<self.__flux_col-1:
+                    __data[k] = 0.25*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                    self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]+\
+                        self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                            self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1])    
+                # bottom     
+                elif i>0 and i<self.__flux_row-1 and j==0:
+                    __data[k] = 0.25*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                    self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                        self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                            self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1])   
+                # interior
+                else:
+                    __data[k] = 0.25*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group][1]+\
+                    self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][1]+\
+                        self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group][1]+\
+                            self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group][1]) 
+                k += 1  
+        # np.savetxt('absorp_op.asu',absorp_op)
+        absorp_op = csr_matrix((__data, (__row, __col)), shape=(self.__flux_col*self.__flux_row, self.__flux_col*self.__flux_row))
+        return absorp_op
+
+    def define_diffus_operator_sparse(self,group):
+        # Validated 2021-1-14
+        __row = np.zeros(5*self.__flux_col*self.__flux_row-2*self.__flux_col-2*self.__flux_row,dtype=np.int32)
+        __col = np.zeros(5*self.__flux_col*self.__flux_row-2*self.__flux_col-2*self.__flux_row,dtype=np.int32)
+        __data = np.zeros(5*self.__flux_col*self.__flux_row-2*self.__flux_col-2*self.__flux_row)
+        k = 0
+        for i in range(self.__flux_row):
+            for j in range(self.__flux_col):
+                v_i = self.__m2v(i,j)
+                v_i_left = self.__m2v(i-1,j)
+                v_i_right = self.__m2v(i+1,j)
+                v_i_top = self.__m2v(i,j+1)
+                v_i_bottom = self.__m2v(i,j-1)
+
+                # left-bottom
+                if i==0 and j==0:
+                    #
+                    __row[k],__col[k] = v_i,v_i
+                    __data[k] += -0.5*(self.__XS_ls[self.mat_m[i,j]][group][0]/self.geo_m_x[i]+\
+                    0.5*(1-self.__boundary_beta['left'])/(1+self.__boundary_beta['left']))*self.geo_m_y[j]
+                    __data[k] += -0.5*(self.__XS_ls[self.mat_m[i,j]][group][0]/self.geo_m_y[j]+\
+                        0.5*(1-self.__boundary_beta['bottom'])/(1+self.__boundary_beta['bottom']))*self.geo_m_x[i]
+                    k += 1
+                    #
+                    __row[k],__col[k] = v_i,v_i_right
+                    __data[k] += 0.5*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group][0]/self.geo_m_x[i]
+                    k += 1
+                    #
+                    __row[k],__col[k] = v_i,v_i_top
+                    __data[k] += 0.5*self.geo_m_x[i]*self.__XS_ls[self.mat_m[i,j]][group][0]/self.geo_m_y[j]
+                    k += 1
+                # left-top
+                elif i==0 and j==self.__flux_col-1:
+                    __row[k],__col[k] = v_i,v_i
+                    __data[k] += -2*0.5*(self.__XS_ls[self.mat_m[i,j-1]][group][0]/self.geo_m_x[i]+\
+                        0.5*(1-self.__boundary_beta['left'])/(1+self.__boundary_beta['left']))*self.geo_m_y[j-1]
+                    __data[k] += -2*0.5*self.__XS_ls[self.mat_m[i,j-1]][group][0]*\
+                        self.geo_m_x[i]/self.geo_m_y[j-1]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_right    
+                    __data[k] += 2*0.5*self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_y[j-1]/self.geo_m_x[i]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_bottom
+                    __data[k] += 0.5*self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_x[i]/self.geo_m_y[j-1]
+                    k += 1
+                # right-bottom
+                elif i==self.__flux_row-1 and j==0:
+                    __row[k],__col[k] = v_i,v_i
+                    __data[k] += -2*0.5*(self.__XS_ls[self.mat_m[i-1,j]][group][0]/self.geo_m_y[j]+\
+                        0.5*(1-self.__boundary_beta['bottom'])/(1+self.__boundary_beta['bottom']))*self.geo_m_x[i-1]
+                    __data[k] += -2*0.5*self.__XS_ls[self.mat_m[i-1,j]][group][0]*\
+                        self.geo_m_y[j]/self.geo_m_x[i-1]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_top
+                    __data[k] += 2*0.5*self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_x[i-1]/self.geo_m_y[j]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_left
+                    __data[k] += 0.5*self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_y[j]/self.geo_m_x[i-1]
+                    k += 1
+                # right-top
+                elif i==self.__flux_row-1 and j==self.__flux_col-1:
+                    __row[k],__col[k] = v_i,v_i
+                    __data[k] += -4*0.5*self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*\
+                        self.geo_m_x[i-1]/self.geo_m_y[j-1]
+                    __data[k] += -4*0.5*self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*\
+                        self.geo_m_y[j-1]/self.geo_m_x[i-1]
+                    k += 1
+                    
+                    __row[k],__col[k] = v_i,v_i_left
+                    __data[k] += self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_y[j-1]/self.geo_m_x[i-1]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_bottom
+                    __data[k] += self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_x[i-1]/self.geo_m_y[j-1]
+                    k += 1
+
+                # left
+                elif i==0 and j>0 and j<self.__flux_col-1:
+                    __row[k],__col[k] = v_i,v_i
+                    for index_c in range(2):
+                        index_r = 0
+                        __data[k] += -0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_y[j-index_c]/self.geo_m_x[i-index_r]-\
+                                0.5*(1-self.__boundary_beta['bottom'])/(1+self.__boundary_beta['bottom'])*0.5*self.geo_m_y[j-index_c]
+                    for index_c in range(2):
+                        index_r = 0
+                        __data[k] += -0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_x[i-index_r]/self.geo_m_y[j-index_c]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_right
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i,j]][group][0]*self.geo_m_y[j]+\
+                        self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_y[j-1])/self.geo_m_x[i]
+                    k += 1
+                    
+                    __row[k],__col[k] = v_i,v_i_top
+                    __data[k] += 0.5*self.__XS_ls[self.mat_m[i,j]][group][0]*self.geo_m_x[i]/self.geo_m_y[j]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_bottom
+                    __data[k] += 0.5*self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_x[i]/self.geo_m_y[j-1]        
+                    k += 1        
+
+                # bottom
+                elif j==0 and i>0 and i<self.__flux_row-1:
+                    __row[k],__col[k] = v_i,v_i
+                    for index_r in range(2):
+                        index_c = 0
+                        __data[k] += -0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_y[j-index_c]/self.geo_m_x[i-index_r]-\
+                                0.5*(1-self.__boundary_beta['bottom'])/(1+self.__boundary_beta['bottom'])*0.5*self.geo_m_x[i-index_r]
+                    for index_r in range(2):
+                        index_c = 0
+                        __data[k] += -0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_x[i-index_r]/self.geo_m_y[j-index_c]
+                    k += 1
+                    
+                    __row[k],__col[k] = v_i,v_i_top
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i,j]][group][0]*self.geo_m_x[i]+\
+                        self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_x[i-1])/self.geo_m_y[j]
+                    k += 1
+                    
+                    __row[k],__col[k] = v_i,v_i_right
+                    __data[k] += 0.5*self.__XS_ls[self.mat_m[i,j]][group][0]*self.geo_m_y[j]/self.geo_m_x[i]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_left
+                    __data[k] += 0.5*self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_y[j]/self.geo_m_x[i-1] 
+                    k += 1
+                
+                # top
+                elif j==self.__flux_col-1 and i>0 and i<self.__flux_row-1:
+                    __row[k],__col[k] = v_i,v_i
+                    for index_r in range(2):
+                        index_c = 1
+                        __data[k] += -2*0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_y[j-index_c]/self.geo_m_x[i-index_r]
+                    for index_r in range(2):
+                        index_c = 1
+                        __data[k] += -2*0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_x[i-index_r]/self.geo_m_y[j-index_c]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_right
+                    __data[k] += 2*0.5*self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_y[j-1]/self.geo_m_x[i]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_left
+                    __data[k] += 2*0.5*self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_y[j-1]/self.geo_m_x[i-1]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_bottom
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_x[i]+\
+                        self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_x[i-1])/self.geo_m_y[j-1]
+                    k += 1
+
+                # right
+                elif i==self.__flux_row-1 and j>0 and j<self.__flux_col-1:
+                    __row[k],__col[k] = v_i,v_i
+                    for index_c in range(2):
+                        index_r = 1
+                        __data[k] += -2*0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_y[j-index_c]/self.geo_m_x[i-index_r]
+                    for index_c in range(2):
+                        index_r = 1
+                        __data[k] += -2*0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                            self.geo_m_x[i-index_r]/self.geo_m_y[j-index_c]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_top
+                    __data[k] += 2*0.5*self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_x[i-1]/self.geo_m_y[j]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_bottom
+                    __data[k] += 2*0.5*self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_x[i-1]/self.geo_m_y[j-1]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_left
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_y[j]+\
+                        self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_y[j-1])/self.geo_m_x[i-1]
+                    k += 1
+                    
+                # Interior
+                else:
+                    __row[k],__col[k] = v_i,v_i
+                    for index_r in range(2):
+                        for index_c in range(2):
+                            __data[k] += -0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                                self.geo_m_y[j-index_c]/self.geo_m_x[i-index_r]
+                    for index_r in range(2):
+                        for index_c in range(2):
+                            __data[k] += -0.5*self.__XS_ls[self.mat_m[i-index_r,j-index_c]][group][0]*\
+                                self.geo_m_x[i-index_r]/self.geo_m_y[j-index_c]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_right
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i,j]][group][0]*self.geo_m_y[j]+\
+                        self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_y[j-1])/self.geo_m_x[i]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_left
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_y[j]+\
+                        self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_y[j-1])/self.geo_m_x[i-1]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_top
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i,j]][group][0]*self.geo_m_x[i]+\
+                        self.__XS_ls[self.mat_m[i-1,j]][group][0]*self.geo_m_x[i-1])/self.geo_m_y[j]
+                    k += 1
+
+                    __row[k],__col[k] = v_i,v_i_bottom
+                    __data[k] += 0.5*(self.__XS_ls[self.mat_m[i,j-1]][group][0]*self.geo_m_x[i]+\
+                        self.__XS_ls[self.mat_m[i-1,j-1]][group][0]*self.geo_m_x[i-1])/self.geo_m_y[j-1]
+                    k += 1
+        # np.savetxt('diffus_op.asu',diffus_op)
+        diffus_op = csr_matrix((__data, (__row, __col)), shape=(self.__flux_col*self.__flux_row, self.__flux_col*self.__flux_row))
+        return diffus_op
+
+    def __define_matrix(self):
+        self.__matrix_A = [None]*self.__group_num
+        for group in range(self.__group_num):
+            self.__matrix_A[group] = self.define_diffus_operator_sparse(group)-\
+                self.define_absorp_operator_sparse(group)
+    
+    def __define_source(self,k):
+        # Add the scattering source to the fission source
+        self.__source_b = [None]*self.__group_num
+        for group in range(self.__group_num):
+            self.__source_b[group] = self.define_scattering_term(group)
+            # self.__fission_source[group] = self.define_fission_term(group)
+            self.__source_b[group] += self.__fission_source[group]/k
+    
+    def __define_fission_source(self):
+        # Initial or update the fission source
+        self.__fission_source = [None]*self.__group_num
+        for group in range(self.__group_num):
+            self.__fission_source[group] = self.define_fission_term(group)
+
+    def __calculate_fission(self):
+        fission = 0
+        for group in range(self.__group_num):
+            fission += self.__fission_source[group].sum()
+        return fission
+    
+    def __save_result(self):
+        pass
+
+    def solve_source_iter(self,max_iter,k_tolerance,flux_tolerance,initial_k=1.0):
+        k = initial_k
+        self.__define_matrix()
+        self.__initial_flux()
+        for i in range(max_iter):
+            # Update source
+            if i==0:
+                self.__define_fission_source()
+                self.__define_source(k)
+                last_fission = self.__calculate_fission()
+            # Solve flux
+            # Ax = b
+            for group in range(self.__group_num):
+                # np.savetxt('source__b_group_{}.asu'.format(group),self.__source_b[group],fmt="%1.2f")
+                # np.savetxt('matrix_A_group_{}.asu'.format(group),self.__matrix_A[group].toarray(),fmt="%1.2f")
+                self.__flux[group] = spsolve(self.__matrix_A[group], -self.__source_b[group])
+            # Update k and source
+            self.__define_fission_source()
+            new_fission = self.__calculate_fission()
+            new_k = k*new_fission/last_fission
+            # Stopping criterion
+            if abs(k-new_k)/new_k<=k_tolerance:
+                print('Iteration {}: Eigenvalue k met the criterion and k = {}'.format(i+1,new_k))
+                self.__save_result()
+                break 
+            else:
+                print('Iteration {}: Eigenvalue k = {}'.format(i+1,new_k))
+            if i==max_iter-1:
+                print('Reached the maximum iteration number{}'.format(i+1))
+                self.__save_result()
+            # Update
+            last_fission = new_fission
+            k = new_k
+            self.__define_source(k)
