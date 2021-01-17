@@ -3,6 +3,7 @@ import scipy
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
 from collections import Iterable
+
 '''
 The finite difference code for the neutron diffusion equation
 Wei Xiao
@@ -45,6 +46,12 @@ class geometry_FDM:
     def set_block_mat(self,mat,row,col):
         self.__mat_block[row,col] = mat.check_id()
     
+    def set_block_mat_by_array(self,array):
+        if array.shape[0] == self.x_block and array.shape[1] == self.y_block:
+            self.__mat_block = array
+        else:
+            print('Dimension error')
+    
     def set_block_size(self,x_size,y_size):
         if len(x_size)==self.x_block and len(y_size)==self.y_block:
             self.x_size = x_size
@@ -72,8 +79,6 @@ class geometry_FDM:
     def get_block_mat(self,row,col):
         return self.__mat_block[row,col]
 
-        
-
 class solver_FDM:
     def __init__(self,group_num):
         self.__group_num = group_num
@@ -87,10 +92,9 @@ class solver_FDM:
         self.boundary_set('right','vaccuum')
         self.boundary_set('top','vaccuum')
 
-        # self.__group_num = 2 
-        
-        # self.__define_geo_m_x()
-        # self.__define_geo_m_y()
+        self.__source_b = [None]*self.__group_num
+        self.__fission_source = [None]*self.__group_num
+        self.__matrix_A = [None]*self.__group_num
 
     def add_material(self,material):
         if isinstance(material, Iterable):
@@ -114,15 +118,21 @@ class solver_FDM:
         else:
             print('There is no material {}'.format(mat_id))
     
+    # Material list
+    # 1st: material; 2nd: group; 3rd: XS: Dg, Σag, vΣfg, Σs, χ    
     def __to_XS(self,material):
         XS = [None]*self.__group_num
         for group in range(self.__group_num):
             XS_group = [None]*5
             XS_group[0] = material.get_XS('Diffusion_coef')[group]
-            XS_group[1] = material.get_XS('XS_absorption')[group]
             XS_group[2] = material.get_XS('XS_nu_fission')[group]
             XS_group[3] = material.get_XS('XS_scatter')[group]
             XS_group[4] = material.get_XS('XS_fission_spectrum')[group]
+            for i in range(self.__group_num):
+                if i==0:
+                    XS_group[1] = material.get_XS('XS_absorption')[group]
+                else:
+                    XS_group[1] += XS_group[3][i]
             XS[group] = XS_group
         return XS
 
@@ -166,8 +176,6 @@ class solver_FDM:
         v_i = m_j*self.__flux_row+m_i
         return v_i
 
-    # Material list
-    # 1st: material; 2nd: group; 3rd: XS: Dg, Σag, vΣfg, Σs, χ
     def __define_mat_m(self,geo):
         self.mat_m = np.zeros((self.__mat_row,self.__mat_col),dtype=np.int32)
         for j in range(geo.y_block):
@@ -175,16 +183,13 @@ class solver_FDM:
                 self.mat_m[self.__x_mat_index[i]:self.__x_mat_index[i+1],
                 self.__y_mat_index[j]:self.__y_mat_index[j+1]] = geo.get_block_mat(i,j)
 
-
     #TODO
     def __define_geo_m_x(self,geo):
-        # self.geo_m_x = np.ones(self.__mat_row)
         self.geo_m_x = np.zeros(self.__mat_row)
         for i in range(geo.x_block):
             self.geo_m_x[self.__x_mat_index[i]:self.__x_mat_index[i+1]] = geo.x_size[i]/geo.x_dim[i]
     
     def __define_geo_m_y(self,geo):
-        # self.geo_m_y = np.ones(self.__mat_col)
         self.geo_m_y = np.zeros(self.__mat_col)
         for i in range(geo.y_block):
             self.geo_m_y[self.__y_mat_index[i]:self.__y_mat_index[i+1]] = geo.y_size[i]/geo.y_dim[i]
@@ -469,6 +474,7 @@ class solver_FDM:
             for i in range(self.__flux_row):
                 for j in range(self.__flux_col):
                     v_i = self.__m2v(i,j)
+                    # left-bottom
                     if i==0 and j==0:
                         fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
                         self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
@@ -817,22 +823,22 @@ class solver_FDM:
         return diffus_op
 
     def __define_matrix(self):
-        self.__matrix_A = [None]*self.__group_num
         for group in range(self.__group_num):
-            self.__matrix_A[group] = self.define_diffus_operator_sparse(group)-\
+            self.__matrix_A[group] = -self.define_diffus_operator_sparse(group)+\
                 self.define_absorp_operator_sparse(group)
     
     def __define_source(self,k):
         # Add the scattering source to the fission source
-        self.__source_b = [None]*self.__group_num
         for group in range(self.__group_num):
             self.__source_b[group] = self.define_scattering_term(group)
-            # self.__fission_source[group] = self.define_fission_term(group)
             self.__source_b[group] += self.__fission_source[group]/k
+
+    def __define_source_group(self,k,group):
+        self.__source_b[group] = self.define_scattering_term(group)+\
+            self.__fission_source[group]/k
     
     def __define_fission_source(self):
         # Initial or update the fission source
-        self.__fission_source = [None]*self.__group_num
         for group in range(self.__group_num):
             self.__fission_source[group] = self.define_fission_term(group)
 
@@ -842,8 +848,44 @@ class solver_FDM:
             fission += self.__fission_source[group].sum()
         return fission
     
-    def __save_result(self):
-        pass
+    def __save_result(self,name='result'):
+        # Save the flux distribution and the material layout to .vtk
+        # Please use ParaView or etc. to visualize it
+        self.__get_ordinate()
+        with open('{}.vtk'.format(name),'w') as file_obj:
+            file_obj.write('# vtk DataFile Version 2.0'+'\n')
+            file_obj.write('FDM Code for neutron diffusion'+'\n')
+            file_obj.write('ASCII'+'\n')
+            file_obj.write('DATASET RECTILINEAR_GRID'+'\n')
+            file_obj.write('DIMENSIONS {} {} {}'.format(self.__flux_row,self.__flux_col,1)+'\n')
+            file_obj.write('X_COORDINATES {} float'.format(self.__flux_row)+'\n')
+            file_obj.write(' '.join(str(i) for i in self.__x_ordinate)+'\n')
+            file_obj.write('Y_COORDINATES {} float'.format(self.__flux_col)+'\n')
+            file_obj.write(' '.join(str(i) for i in self.__y_ordinate)+'\n')
+            file_obj.write('Z_COORDINATES 1 float'+'\n')
+            file_obj.write('0.0'+'\n')
+            file_obj.write('POINT_DATA {}'.format(self.__flux_row*self.__flux_col)+'\n')
+            for group in range(self.__group_num):
+                flux = self.__flux[group]
+                file_obj.write('SCALARS Flux_group_{} float 1'.format(group)+'\n')
+                file_obj.write('LOOKUP_TABLE default'+'\n')
+                for i in range(self.__flux_row*self.__flux_col):
+                    file_obj.write('{}'.format(flux[i])+'\n')
+            file_obj.write('CELL_DATA {}'.format(self.__mat_row*self.__mat_col)+'\n')
+            file_obj.write('SCALARS Material_layout int 1'+'\n')
+            file_obj.write('LOOKUP_TABLE default'+'\n')
+            for j in range(self.__mat_col):
+                for i in range(self.__mat_row):
+                    file_obj.write('{}'.format(self.mat_m[i,j])+'\n')
+          
+    def __get_ordinate(self):
+        # Get ordinates of rectilinear grid
+        self.__x_ordinate = np.zeros(self.__flux_row)
+        self.__y_ordinate = np.zeros(self.__flux_col)
+        for i in range(self.__flux_row-1):
+            self.__x_ordinate[i+1] = self.__x_ordinate[i]+self.geo_m_x[i]
+        for i in range(self.__flux_col-1):
+            self.__y_ordinate[i+1] = self.__y_ordinate[i]+self.geo_m_y[i]
 
     def solve_source_iter(self,max_iter,k_tolerance,flux_tolerance,initial_k=1.0):
         k = initial_k
@@ -858,9 +900,7 @@ class solver_FDM:
             # Solve flux
             # Ax = b
             for group in range(self.__group_num):
-                # np.savetxt('source__b_group_{}.asu'.format(group),self.__source_b[group],fmt="%1.2f")
-                # np.savetxt('matrix_A_group_{}.asu'.format(group),self.__matrix_A[group].toarray(),fmt="%1.2f")
-                self.__flux[group] = spsolve(self.__matrix_A[group], -self.__source_b[group])
+                self.__flux[group] = spsolve(self.__matrix_A[group], self.__source_b[group])
             # Update k and source
             self.__define_fission_source()
             new_fission = self.__calculate_fission()
@@ -875,7 +915,40 @@ class solver_FDM:
             if i==max_iter-1:
                 print('Reached the maximum iteration number{}'.format(i+1))
                 self.__save_result()
-            # Update
+            # Update others
             last_fission = new_fission
             k = new_k
             self.__define_source(k)
+
+    def solve_source_iter_correct(self,max_iter,k_tolerance,flux_tolerance,initial_k=1.0):
+        # With an acceleration trick
+        k = initial_k
+        self.__define_matrix()
+        self.__initial_flux()
+        for i in range(max_iter):
+            # Update source
+            if i==0:
+                self.__define_fission_source()
+                last_fission = self.__calculate_fission()
+            # Solve flux
+            # Ax = b
+            for group in range(self.__group_num):
+                self.__define_source_group(k,group)
+                self.__flux[group] = spsolve(self.__matrix_A[group], self.__source_b[group])
+            # Update k and source
+            self.__define_fission_source()
+            new_fission = self.__calculate_fission()
+            new_k = k*new_fission/last_fission
+            # Stopping criterion
+            if abs(k-new_k)/new_k<=k_tolerance:
+                print('Iteration {}: Eigenvalue k met the criterion and k = {}'.format(i+1,new_k))
+                self.__save_result()
+                break 
+            else:
+                print('Iteration {}: Eigenvalue k = {}'.format(i+1,new_k))
+            if i==max_iter-1:
+                print('Reached the maximum iteration number{}'.format(i+1))
+                self.__save_result()
+            # Update others
+            last_fission = new_fission
+            k = new_k
