@@ -8,6 +8,9 @@ from collections import Iterable
 import os
 import copy
 
+# Import PKE solvers
+from PKE_solver import solver_PKE
+
 '''
 The finite difference code for the transient neutron diffusion equation
 Wei Xiao
@@ -359,16 +362,27 @@ class solver_FDM:
         self.__block_area = temp.flatten(order='F')
 
     # Initial flux
-    def __initial_flux(self):
-        #TODO
-        # Initial flux storage
-        self.__flux = [None]*self.__group_num
-        self.__flux_blockwise = [None]*self.__group_num
-        for i in range(self.__group_num):
-            self.__flux[i] = np.ones(self.__flux_col*self.__flux_row)
-            self.__flux_blockwise[i] = np.ones(self.__block_col*self.__block_row)
-        self.__fission_dist = np.ones(self.__flux_col*self.__flux_row)
-        self.__fission_dist_last = np.ones(self.__flux_col*self.__flux_row)
+    def __initial_flux(self,flux_type='Normal'):
+        if flux_type == 'Normal':
+            #TODO
+            # Initial flux storage
+            self.__flux = [None]*self.__group_num
+            self.__flux_blockwise = [None]*self.__group_num
+            for i in range(self.__group_num):
+                self.__flux[i] = np.ones(self.__flux_col*self.__flux_row)
+                self.__flux_blockwise[i] = np.ones(self.__block_col*self.__block_row)
+            self.__fission_dist = np.ones(self.__flux_col*self.__flux_row)
+            self.__fission_dist_last = np.ones(self.__flux_col*self.__flux_row)
+        elif flux_type == 'Adjoint':
+            #TODO
+            # Initial flux storage
+            self.__flux_adjoint = [None]*self.__group_num
+            self.__flux_blockwise_adjoint = [None]*self.__group_num
+            for i in range(self.__group_num):
+                self.__flux_adjoint[i] = np.ones(self.__flux_col*self.__flux_row)
+                self.__flux_blockwise_adjoint[i] = np.ones(self.__block_col*self.__block_row)
+            self.__fission_dist = np.ones(self.__flux_col*self.__flux_row)
+            self.__fission_dist_last = np.ones(self.__flux_col*self.__flux_row)
     
     ############Initial settings for transient calculation############
     def initial_dynamics(self,time_steps,transient_algorithm='SCM',vtk_save=True):
@@ -443,18 +457,22 @@ class solver_FDM:
         if transient_algorithm=='SCM':
             # Update dynamics cross-sections
             # Temp variable (vector:block_row*block_col)
+            self.__nufission_block = [None]*self.__group_num
             temp = np.zeros((self.__block_row*self.__block_col))
             for delay_group in range(self.__delay_group_num):
                 temp += self.__delay_lambda[delay_group]*self.__delay_beta[delay_group]/\
                     (self.__precursor_freq[delay_group]+self.__delay_lambda[delay_group])
             for group in range(self.__group_num):
+                self.__nufission_block[group] = np.zeros(self.__block_row*self.__block_col)
                 for j in range(self.__block_col):
                     for i in range(self.__block_row):
                         v_i = self.__m2v_block(i,j)
                         mat_id = self.__mat_block[i,j]
                         mat_id_real = self.__mat_block_real[i,j]
                         # Dynamics fission XS
-                        self.__XS_ls[mat_id][group][2] = self.__XS_ls_real[mat_id_real][group][2]/self.__k_init
+                        temp_var = self.__XS_ls_real[mat_id_real][group][2]/self.__k_init
+                        self.__XS_ls[mat_id][group][2] = temp_var
+                        self.__nufission_block[group][v_i] =  temp_var
                         # Dynamics absorption XS
                         self.__XS_ls[mat_id][group][1] = self.__XS_ls_real[mat_id_real][group][1]+\
                             (self.__shape_freq[group][v_i]+self.__amp_freq)/self.__neutron_v[group]
@@ -511,6 +529,23 @@ class solver_FDM:
         # for i in range(self.__delay_group_num):
         #     self.__precursor_conc[i] = (precursor_conc_last[i]+\
         #         fission_blockwise*time_interval*self.__delay_beta[i])/(1+self.__delay_lambda[i]*time_interval)
+    def __update_conc_exp(self,flux_blockwise_last,precursor_conc_last,amp_freq,amp_freq_last,shape_freq,shape_freq_last,time_interval):
+
+        # TODO
+        ave_amp_freq = (amp_freq+amp_freq_last)/2
+        ave_shape_freq = shape_freq
+
+        Q_g = [None]*self.__group_num
+        for group in range(self.__group_num):
+            Q_g[group] = self.__nufission_block[group]*flux_blockwise_last[group]
+        
+        for i in range(self.__delay_group_num):
+            integral = 0
+            for group in range(self.__group_num):
+                integral += Q_g[group]*(np.exp((ave_amp_freq+ave_shape_freq[group])*time_interval)-np.exp(-self.__delay_lambda[i]*time_interval))\
+                    /(ave_amp_freq+ave_shape_freq[group]+self.__delay_lambda[i])
+            self.__precursor_conc[i] = precursor_conc_last[i]*np.exp(-self.__delay_lambda[i]*time_interval)\
+                +self.__delay_beta[i]*integral
 
 
     def __update_amp_freq(self,kD,fission_dist_pointwise,flux_pointwise):
@@ -613,6 +648,11 @@ class solver_FDM:
                 
 
     ########################################################################
+    # PKE predictor
+    def __get_dynamics_parameters(self):
+        pass
+
+    ########################################################################
 
     # Boundary
     def boundary_set(self,loc,boundary_type,beta=0):
@@ -628,12 +668,14 @@ class solver_FDM:
 
     # Discretization of operators
     #TODO
-    def define_scattering_term(self,group_in):
+    def define_scattering_term(self,group_in,flux=None):
+        if flux==None:
+            flux = self.__flux
         # Validated 2021-1-14
         scatter_term = np.zeros(self.__flux_col*self.__flux_row)
         for group_out in range(self.__group_num):
             if group_out != group_in:
-                group_flux = self.__flux[group_out]
+                group_flux = flux[group_out]
                 for i in range(self.__flux_row):
                     for j in range(self.__flux_col):
                         v_i = self.__m2v(i,j)
@@ -1118,14 +1160,147 @@ class solver_FDM:
                                 self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2])  
         return fission_term
 
-
+    # Adjoint operator (scattering and nu-fission)
+    def define_adjoint_scattering_term(self,group_out,flux=None):
+        if flux==None:
+            flux = self.__flux_adjoint
+        # Adjoint scattering term 
+        scatter_term = np.zeros(self.__flux_col*self.__flux_row)
+        for group_in in range(self.__group_num):
+            if group_in != group_out:
+                group_flux = flux[group_in]
+                for i in range(self.__flux_row):
+                    for j in range(self.__flux_col):
+                        v_i = self.__m2v(i,j)
+                        if i==0 and j==0:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                            self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                                self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                                    self.__boundary['left']*self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in])
+                        # left-top
+                        elif i==0 and j==self.__flux_col-1:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
+                            self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
+                                self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
+                                    self.__boundary['left']*self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]) 
+                        # right-bottom               
+                        elif i==self.__flux_row-1 and j==0:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                            self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                                self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                                    self.__boundary['right']*self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in])   
+                        # right-top
+                        elif i==self.__flux_row-1 and j==self.__flux_col-1:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]+\
+                            self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]+\
+                                self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]+\
+                                    self.__boundary['right']*self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]) 
+                        # left
+                        elif i==0 and j>0 and j<self.__flux_col-1:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                            self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
+                                self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                                    self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]) 
+                        # top
+                        elif i>0 and i<self.__flux_row-1 and j==self.__flux_col-1:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
+                            self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]+\
+                                self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]+\
+                                    self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in])         
+                        # right
+                        elif i==self.__flux_row-1 and j>0 and j<self.__flux_col-1:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                            self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in]+\
+                                self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                                    self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in])    
+                        # bottom     
+                        elif i>0 and i<self.__flux_row-1 and j==0:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                            self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                                self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                                    self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in])   
+                        # interior
+                        else:
+                            scatter_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][3][group_in]+\
+                            self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][3][group_in]+\
+                                self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][3][group_in]+\
+                                    self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][3][group_in])  
+        # np.savetxt('scattering_term.asu',scatter_term)
+        return scatter_term
+    
+    def define_adjoint_fission_term(self,group_out,flux=None):
+        if flux==None:
+            flux = self.__flux_adjoint
+        # Validated 2021-1-14
+        fission_term = np.zeros(self.__flux_col*self.__flux_row)
+        for group_in in range(self.__group_num):
+            # group_flux = self.__flux[group_out]
+            group_flux = flux[group_in]
+            for i in range(self.__flux_row):
+                for j in range(self.__flux_col):
+                    v_i = self.__m2v(i,j)
+                    # left-bottom
+                    if i==0 and j==0:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                        self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                            self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                                self.__boundary['left']*self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4])
+                    # left-top
+                    elif i==0 and j==self.__flux_col-1:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
+                        self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
+                            self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
+                                self.__boundary['left']*self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]) 
+                    # right-bottom               
+                    elif i==self.__flux_row-1 and j==0:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                        self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                            self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                                self.__boundary['right']*self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4])   
+                    # right-top
+                    elif i==self.__flux_row-1 and j==self.__flux_col-1:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]+\
+                        self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]+\
+                            self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]+\
+                                self.__boundary['right']*self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]) 
+                    # left
+                    elif i==0 and j>0 and j<self.__flux_col-1:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                        self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
+                            self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                                self.__boundary['left']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]) 
+                    # top
+                    elif i>0 and i<self.__flux_row-1 and j==self.__flux_col-1:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
+                        self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]+\
+                            self.__boundary['top']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]+\
+                                self.__boundary['top']*self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4])         
+                    # right
+                    elif i==self.__flux_row-1 and j>0 and j<self.__flux_col-1:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                        self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4]+\
+                            self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                                self.__boundary['right']*self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4])    
+                    # bottom     
+                    elif i>0 and i<self.__flux_row-1 and j==0:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                        self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                            self.__boundary['bottom']*self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                                self.__boundary['bottom']*self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4])   
+                    # interior
+                    else:
+                        fission_term[v_i] += 0.25*group_flux[v_i]*(self.geo_m_x[i-1]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i-1,j]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j]][group_in][4]+\
+                        self.geo_m_x[i]*self.geo_m_y[j]*self.__XS_ls[self.mat_m[i,j]][group_out][2]*self.__XS_ls[self.mat_m[i,j]][group_in][4]+\
+                            self.geo_m_x[i]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i,j-1]][group_in][4]+\
+                                self.geo_m_x[i-1]*self.geo_m_y[j-1]*self.__XS_ls[self.mat_m[i-1,j-1]][group_out][2]*self.__XS_ls[self.mat_m[i-1,j-1]][group_in][4])  
+        return fission_term
+    
     def __define_matrix(self):
         self.__matrix_LU = [None]*self.__group_num
         for group in range(self.__group_num):
             self.__matrix_A[group] = -self.define_diffus_operator_sparse(group)+\
                 self.define_absorp_operator_sparse(group)
             self.__matrix_LU[group] = splu(self.__matrix_A[group])
-            
     
     # def __define_source(self,k):
     #     # Add the scattering source to the fission source
@@ -1133,15 +1308,23 @@ class solver_FDM:
     #         self.__source_b[group] = self.define_scattering_term(group)
     #         self.__source_b[group] += self.__fission_source[group]/k
 
-    def __define_source_group(self,k,group,external_source=0):
-        self.__source_b[group] = self.define_scattering_term(group)+\
-            self.__fission_source[group]/k+external_source
+    def __define_source_group(self,k,group,external_source=0,source_type='Normal'):
+        if source_type == 'Normal':
+            self.__source_b[group] = self.define_scattering_term(group)+\
+                self.__fission_source[group]/k+external_source
+        elif source_type == 'Adjoint':
+            self.__source_b[group] = self.define_adjoint_scattering_term(group)+\
+                self.__fission_source[group]/k+external_source
     
-    def __define_fission_source(self):
+    def __define_fission_source(self,source_type='Normal'):
         # Initial or update the fission source
-        for group in range(self.__group_num):
-            self.__fission_source[group] = self.define_fission_term(group)
-    
+        if source_type == 'Normal':
+            for group in range(self.__group_num):
+                self.__fission_source[group] = self.define_fission_term(group)
+        elif source_type == 'Adjoint':
+            for group in range(self.__group_num):
+                self.__fission_source[group] = self.define_adjoint_fission_term(group,flux=self.__flux_adjoint)
+        
     def __flux2Q_pointwise(self,flux):
         # Q distribution (None group)
         # Q_dist = 0
@@ -1159,15 +1342,22 @@ class solver_FDM:
         return temp_dist.sum()  
 
     # Not recommended
-    def __calculate_fission(self):
+    def __calculate_fission(self,source_type='Normal'):
         # self.__fission_dist_last = self.__fission_dist
         # self.__fission_dist = 0
         # for group in range(self.__group_num):
         #     self.__fission_dist += self.__fission_source[group]
-        self.__fission_dist_last = self.__fission_dist
-        self.__fission_dist = self.define_Q_term()
-        return self.__fission_dist.sum()  
-    
+        if source_type=='Normal':
+            self.__fission_dist_last = self.__fission_dist
+            self.__fission_dist = self.define_Q_term()
+            return self.__fission_dist.sum()  
+        elif source_type=='Adjoint':
+            self.__fission_dist_last = self.__fission_dist
+            self.__fission_dist = 0
+            for group in range(self.__group_num):
+                self.__fission_dist += self.__fission_source[group]
+            return self.__calculate_total_Q(self.__fission_dist,'pointwise')
+        
     def __calculate_dist_pointwise(self,dist):
         return dist/self.__mesh_area
 
@@ -1243,8 +1433,10 @@ class solver_FDM:
             for group in range(self.__group_num):
                 self.__flux[group] = normal_c*self.__flux[group]*self.__k_init
             print('Total Q (initial): {}'.format(1))
-        fission_dist_blockwise = np.reshape(self.__fission_dist_blockwise,(self.__block_row,self.__block_col),order='F') 
-        np.savetxt('{}/fission_blockwise_{}.asu'.format(self.__folder_name,name),fission_dist_blockwise,fmt="%1.4e")
+        
+        if save_type=='steady' or save_type=='transient':    
+            fission_dist_blockwise = np.reshape(self.__fission_dist_blockwise,(self.__block_row,self.__block_col),order='F') 
+            np.savetxt('{}/fission_blockwise_{}.asu'.format(self.__folder_name,name),fission_dist_blockwise,fmt="%1.4e")
         #############
         with open('{}/{}.vtk'.format(self.__folder_name,name),'w') as file_obj:
             file_obj.write('# vtk DataFile Version 2.0'+'\n')
@@ -1259,18 +1451,28 @@ class solver_FDM:
             file_obj.write('Z_COORDINATES 1 float'+'\n')
             file_obj.write('0.0'+'\n')
             file_obj.write('POINT_DATA {}'.format(self.__flux_row*self.__flux_col)+'\n')
-            # Flux
-            for group in range(self.__group_num):
-                flux = self.__flux[group]
-                file_obj.write('SCALARS Flux_group_{} float 1'.format(group)+'\n')
+
+            if save_type=='steady' or save_type=='transient':
+                # Flux
+                for group in range(self.__group_num):
+                    flux = self.__flux[group]
+                    file_obj.write('SCALARS Flux_group_{} float 1'.format(group)+'\n')
+                    file_obj.write('LOOKUP_TABLE default'+'\n')
+                    for i in range(self.__flux_row*self.__flux_col):
+                        file_obj.write('{}'.format(flux[i])+'\n')
+                # Fission
+                file_obj.write('SCALARS Fission_source float 1'+'\n')
                 file_obj.write('LOOKUP_TABLE default'+'\n')
                 for i in range(self.__flux_row*self.__flux_col):
-                    file_obj.write('{}'.format(flux[i])+'\n')
-            # Fission
-            file_obj.write('SCALARS Fission_source float 1'+'\n')
-            file_obj.write('LOOKUP_TABLE default'+'\n')
-            for i in range(self.__flux_row*self.__flux_col):
-                file_obj.write('{}'.format(self.__fission_dist_pointwise[i])+'\n') 
+                    file_obj.write('{}'.format(self.__fission_dist_pointwise[i])+'\n') 
+            elif save_type=='adjoint':
+                # Adjoint flux
+                for group in range(self.__group_num):
+                    flux = self.__flux_adjoint[group]
+                    file_obj.write('SCALARS Adjoint_flux_group_{} float 1'.format(group)+'\n')
+                    file_obj.write('LOOKUP_TABLE default'+'\n')
+                    for i in range(self.__flux_row*self.__flux_col):
+                        file_obj.write('{}'.format(flux[i])+'\n')
             # Material
             file_obj.write('CELL_DATA {}'.format(self.__mat_row*self.__mat_col)+'\n')
             file_obj.write('SCALARS Material_layout int 1'+'\n')
@@ -1287,6 +1489,7 @@ class solver_FDM:
             self.__x_ordinate[i+1] = self.__x_ordinate[i]+self.geo_m_x[i]
         for i in range(self.__flux_col-1):
             self.__y_ordinate[i+1] = self.__y_ordinate[i]+self.geo_m_y[i]
+
 
     def solve_source_iter_correct(self,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,initial_k=1.0):
         # With an acceleration trick
@@ -1328,8 +1531,50 @@ class solver_FDM:
             last_fission = new_fission
             k = new_k
 
+    def solve_source_adjoint_iter_correct(self,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,initial_k=1.0):
+        # With an acceleration trick
+        k = initial_k
+        self.__define_matrix()
+        self.__initial_flux(flux_type='Adjoint')
+        print('####################################')
+        print('Adjoint equations calculation begins')
+        for i in range(max_iter):
+            # Update source
+            if i==0:
+                self.__define_fission_source(source_type='Adjoint')
+                last_fission = self.__calculate_fission(source_type='Adjoint')
+            # Solve flux
+            # Ax = b
+            for group in range(self.__group_num):
+                self.__define_source_group(k,group,external_source=0,source_type='Adjoint')
+                # self.__flux[group] = spsolve(self.__matrix_A[group], self.__source_b[group])
+                self.__flux_adjoint[group] = self.__matrix_LU[group].solve(self.__source_b[group])
+            # Update k and source
+            self.__define_fission_source(source_type='Adjoint')
+            new_fission = self.__calculate_fission(source_type='Adjoint')
+            new_k = k*new_fission/last_fission
+            # Stopping criterion
+            fission_dist_error = self.__calculate_fission_dist_error()
+            # self.__k = new_k
+            # self.__k_init = new_k
+            if abs(k-new_k)/new_k<=k_tolerance and fission_dist_error<=flux_tolerance:
+                print('Iteration {}: Met the criteria and k = {}, εq = {}'.format(i+1,new_k,fission_dist_error))
+                self.__save_result(name='Initial_adjoint_flux',save_type='adjoint')
+                break 
+            else:
+                print('Iteration {}: Eigenvalue k = {}'.format(i+1,new_k))
+                # print('Error of fission source εq = {}'.format(fission_dist_error))
+            if i==max_iter-1:
+                print('Reached the maximum iteration number{}'.format(i+1))
+                self.__save_result(name='Initial_adjoint_flux',save_type='adjoint')
+            # Update others
+            last_fission = new_fission
+            k = new_k
+
+
     def solve_transient_SCM_2(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,k_outer_tolerance=1e-6):
         # Ah~
+        # Stiffness confinement method for transient problem
         print('####################################')
         print('Timestep {} calculation begins'.format(time_index))
         # First, store some quantities from the last time step 
@@ -1451,10 +1696,9 @@ class solver_FDM:
             print('Total Q: {}'.format(real_total_Q))
 
             # Update precursor frequency and concentration
-            self.__update_conc(fission_blockwise=real_fission_dist_blockwise,fission_blockwise_last=fission_dist_blockwise_last,precursor_conc_last=precursor_conc_last,time_interval=time_interval)
+            # self.__update_conc(fission_blockwise=real_fission_dist_blockwise,fission_blockwise_last=fission_dist_blockwise_last,precursor_conc_last=precursor_conc_last,time_interval=time_interval)
+            self.__update_conc_exp(flux_blockwise_last,precursor_conc_last,self.__amp_freq,amp_freq_last,self.__shape_freq,shape_freq_last,time_interval)
             self.__update_precursor_freq(precursor_conc=self.__precursor_conc,fission_blockwise=real_fission_dist_blockwise)
-            # self.__update_conc(fission_blockwise=normal_fission_dist_blockwise,fission_blockwise_last=fission_dist_blockwise_last,precursor_conc_last=precursor_conc_last,time_interval=time_interval)
-            # self.__update_precursor_freq(precursor_conc=self.__precursor_conc,fission_blockwise=normal_fission_dist_blockwise)
             # Stopping criterion
             if abs(kD-1)<=k_outer_tolerance:
                 print('Reached the stopping criterion')
@@ -1472,7 +1716,19 @@ class solver_FDM:
         self.__save_mat(time_index=time_index)
         self.__k = kD
 
-   
+    def solve_transient_SCM_PKE_predictor(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,k_outer_tolerance=1e-6):
+
+        # PKE predictor
+        time_start = self.__time_steps[time_interval-1]
+        time_end = self.__time_steps[time_interval]
+        # PKE = solver_PKE(delay_group_num=group,time_start=time_start,time_end=time_end)
+        # PKE.initial_dynamics_parameters(neutron_life=Lambda,delay_beta=beta,delay_lambda=lamb)
+        # PKE.initial_density(neutron_density=1,precursor_conc=C_int)
+        # PKE.time_variant_reactivity(init_rho=0,end_rho=0.0035,variant_type='linear')
+        # omega,mu = PKE.predictor_solve()
+
+        self.solve_transient_SCM_2(time_index,time_interval,max_iter,k_tolerance,flux_tolerance,k_outer_tolerance)
+
     def solve_transient_Implicit_Euler(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3):
         # Implicit Euler method (order-1)
         # Ah~
