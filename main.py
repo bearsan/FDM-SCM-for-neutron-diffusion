@@ -12,13 +12,17 @@ import copy
 from PKE_solver import solver_PKE
 
 '''
-The finite difference code for the transient neutron diffusion equation
-Wei Xiao
+Transient Neutron Diffusion Equations Solver
+Author: Wei Xiao
 Shanghai Jiao Tong University
 School of Nuclear Science and Engineering
 bearsanxw@gmail.com
-Only for the test of transient algorithms
-2021-2-26
+2021-3-18
+'''
+'''
+This is the test code for transient algorithms.
+The code is based on finite difference method (FDM) and 
+stiffness confinement method (SCM).
 '''
 #TODO
 # Use dataframe from pandas to storage the material
@@ -385,12 +389,15 @@ class solver_FDM:
             self.__fission_dist_last = np.ones(self.__flux_col*self.__flux_row)
     
     ############Initial settings for transient calculation############
-    def initial_dynamics(self,time_steps,transient_algorithm='SCM',vtk_save=True):
-        self.__time_steps = time_steps
-        self.__num_time_steps = len(time_steps)
+    def initial_dynamics(self,time_steps,transient_algorithm='SCM',vtk_save=True,max_time_step=2e-2,min_time_step=1e-3):
+        
+        # Save results to .vtk or not
         self.__vtk_save = vtk_save
         # SCM
         if transient_algorithm=='SCM':
+            # Time steps setting
+            self.__time_steps = time_steps
+            self.__num_time_steps = len(time_steps)
             # Initialize dynamics frequency and concentration 
             self.__initial_freq()
             # Get initial concentration
@@ -400,20 +407,53 @@ class solver_FDM:
             self.__amp_freq_ls = np.zeros((2))
           
             # Initialize saving data 
+            self.__results_reactivity = np.zeros(self.__num_time_steps)
             self.__results_Q = np.zeros(self.__num_time_steps)
             self.__results_amp_freq = np.zeros(self.__num_time_steps)
-            self.__results_shape_freq = {}
-            for i in range(self.__group_num):
-                self.__results_shape_freq[i] = np.zeros((self.__num_time_steps,self.__block_col*self.__block_row))
-            self.__results_precursor_conc = {}
-            self.__results_precursor_freq = {}
-            for i in range(self.__delay_group_num):
-                self.__results_precursor_conc[i] = np.zeros((self.__num_time_steps,self.__block_col*self.__block_row))
-                self.__results_precursor_freq[i] = np.zeros((self.__num_time_steps,self.__block_col*self.__block_row))
+            self.__results_shape_freq = np.zeros((self.__group_num,self.__num_time_steps,self.__block_col*self.__block_row))
+            self.__results_precursor_conc = np.zeros((self.__delay_group_num,self.__num_time_steps,self.__block_col*self.__block_row))
+            self.__results_precursor_freq = np.zeros((self.__delay_group_num,self.__num_time_steps,self.__block_col*self.__block_row))
         
             self.__save_mat(time_index=0)
+        # Adaptive SCM
+        elif transient_algorithm=='SCM_adaptive':
+            # Time steps setting
+            self.__key_time_steps = time_steps
+            # The maximum number of time steps (total time interval/minimum time step size)
+            max_step_num = int((time_steps[-1]-time_steps[0])/min_time_step+1)
+            self.__time_steps = np.zeros(max_step_num)
+            self.__time_steps[0] = time_steps[0]
+            self.__num_time_steps = max_step_num
+            # The maximum and minimum time step size for  
+            self.__max_time_step = max_time_step
+            self.__min_time_step = min_time_step
+            # The time pointer
+            # Time pointer is used to make sure that there is no time interval containing the key time points
+            self.__time_pointer = 1
+            # Initialize dynamics frequency and concentration 
+            self.__initial_freq()
+            # Get initial concentration
+            for i in range(self.__delay_group_num):
+                self.__precursor_conc[i] = self.__delay_beta[i]*self.__fission_dist_blockwise/\
+                    (self.__precursor_freq[i]+self.__delay_lambda[i])
+            self.__amp_freq_ls = np.zeros((2))
+          
+            # Initialize saving data 
+            self.__results_reactivity = np.zeros(self.__num_time_steps)
+            self.__results_Q = np.zeros(self.__num_time_steps)
+            self.__results_amp_freq = np.zeros(self.__num_time_steps)
+            self.__results_shape_freq = np.zeros((self.__group_num,self.__num_time_steps,self.__block_col*self.__block_row))
+            self.__results_precursor_conc = np.zeros((self.__delay_group_num,self.__num_time_steps,self.__block_col*self.__block_row))
+            self.__results_precursor_freq = np.zeros((self.__delay_group_num,self.__num_time_steps,self.__block_col*self.__block_row))
+        
+            self.__save_mat(time_index=0,save_type='SCM_adaptive')
+            pass
         # Implicit Euler
         elif transient_algorithm=='Implicit_Euler':
+            # Time steps setting
+            self.__time_steps = time_steps
+            self.__num_time_steps = len(time_steps)
+
             self.__initial_freq(transient_algorithm=transient_algorithm)
 
             # Why????
@@ -424,6 +464,10 @@ class solver_FDM:
                 
             for i in range(self.__delay_group_num):
                 self.__precursor_conc[i] = self.__delay_beta[i]*self.__fission_dist_blockwise/self.__delay_lambda[i]
+        
+        # Storage the initial XS
+        self.__init_XS_narray = self.__narray_XS()
+
 
     # Initial dynamic frequency 
     def __initial_freq(self,transient_algorithm='SCM'):
@@ -453,17 +497,47 @@ class solver_FDM:
     def __initial_amp_freq(self):
         self.__update_amp_freq(self.__k,self.__fission_dist_pointwise,self.__flux)
 
+    def __narray_XS(self):
+        # dict + narray
+        # We don't store the diffusion coefficients
+        narray_XS = {}
+        nufission_block = np.zeros((self.__group_num,self.__block_row*self.__block_col))
+        chi_block = np.zeros((self.__group_num,self.__block_row*self.__block_col))
+        total_block = np.zeros((self.__group_num,self.__block_row*self.__block_col))
+        scatter_block = np.zeros((self.__group_num,self.__group_num,self.__block_row*self.__block_col))
+        for group in range(self.__group_num):
+            for j in range(self.__block_col):
+                for i in range(self.__block_row):
+                    v_i = self.__m2v_block(i,j)
+                    mat_id_real = self.__mat_block_real[i,j]
+                    # XS
+                    nufission_block[group,v_i] = self.__XS_ls_real[mat_id_real][group][2]/self.__k_init
+                    chi_block[group,v_i] = self.__XS_ls_real[mat_id_real][group][4]
+                    total_block[group,v_i] = self.__XS_ls_real[mat_id_real][group][1]
+                    for group_in in range(self.__group_num):
+                        scatter_block[group,group_in,v_i] = self.__XS_ls_real[mat_id_real][group][3][group_in]
+        
+        narray_XS['nu-fission'] = nufission_block
+        narray_XS['chi'] = chi_block
+        narray_XS['total'] = total_block
+        narray_XS['scatter'] = scatter_block
+
+        return narray_XS
+
+
     def __update_dynamics_XS(self,transient_algorithm='SCM',time_interval=None):
         if transient_algorithm=='SCM':
             # Update dynamics cross-sections
             # Temp variable (vector:block_row*block_col)
             self.__nufission_block = [None]*self.__group_num
+            self.__chi_block = [None]*self.__group_num
             temp = np.zeros((self.__block_row*self.__block_col))
             for delay_group in range(self.__delay_group_num):
                 temp += self.__delay_lambda[delay_group]*self.__delay_beta[delay_group]/\
                     (self.__precursor_freq[delay_group]+self.__delay_lambda[delay_group])
             for group in range(self.__group_num):
                 self.__nufission_block[group] = np.zeros(self.__block_row*self.__block_col)
+                self.__chi_block[group] = np.zeros(self.__block_row*self.__block_col)
                 for j in range(self.__block_col):
                     for i in range(self.__block_row):
                         v_i = self.__m2v_block(i,j)
@@ -479,6 +553,7 @@ class solver_FDM:
                         # Dynamics fission spectrum
                         self.__XS_ls[mat_id][group][4] = self.__XS_ls_real[mat_id_real][group][4]*\
                             (1-self.__delay_total_beta+temp[v_i])
+                        self.__chi_block[group][v_i] = self.__XS_ls_real[mat_id_real][group][4]
         elif transient_algorithm=='Implicit_Euler':
             temp = 0
             # print(self.__XS_ls_real)
@@ -569,15 +644,31 @@ class solver_FDM:
         print('Amplitude frequency (new): {}'.format(self.__amp_freq))
         
 
-    def __update_amp_freq_tang(self,kD,kD_last,amp_freq,amp_freq_last):
+    def __update_amp_freq_secant(self,kD,kD_last,amp_freq,amp_freq_last,iter_index):
         # Method 2
         # print('kD:{}'.format(kD))
         # print('kD last:{}'.format(kD_last))
-        print('Amplitude frequency:{}'.format(amp_freq))
+        # if i==0:
+        #     self.__amp_freq = self.__amp_freq_predict
+        # elif i==1:
+        #     self.__amp_freq_last = self.__amp_freq_predict
+        #     if abs(self.__amp_freq_predict)>=1e-7:
+        #         self.__amp_freq = 1.1*self.__amp_freq_predict
+        #     else:
+        #         self.__amp_freq = self.__amp_freq_predict + 0.1
         print('Amplitude frequency last:{}'.format(amp_freq_last))
-        amp_freq_new = amp_freq+(amp_freq_last-amp_freq)*(1-kD)/(kD_last-kD)
-        self.__amp_freq_last = amp_freq
-        self.__amp_freq = amp_freq_new
+        print('Amplitude frequency:{}'.format(amp_freq))
+        if iter_index>=1:
+            amp_freq_new = amp_freq+(amp_freq_last-amp_freq)*(1-kD)/(kD_last-kD)
+            self.__amp_freq_last = amp_freq
+            self.__amp_freq = amp_freq_new
+        elif iter_index==0:
+            if abs(amp_freq)<1e-7:
+                amp_freq_new = amp_freq+0.1
+            else:
+                amp_freq_new = amp_freq*1.01
+            self.__amp_freq_last = amp_freq
+            self.__amp_freq = amp_freq_new
         print('Amplitude frequency new:{}'.format(amp_freq_new))
 
     
@@ -648,9 +739,113 @@ class solver_FDM:
                 
 
     ########################################################################
-    # PKE predictor
-    def __get_dynamics_parameters(self):
-        pass
+    # PKE predictor for amplitude frequency
+    def __get_reactivity(self,fission_blockwise,flux_blockwise,adjoint_flux_blockwise,XS,init_XS):
+        # F
+        F = 0
+        for group in range(self.__group_num):
+            integral = self.__block_area*adjoint_flux_blockwise[group]*fission_blockwise*XS['chi'][group,:]
+            F += integral.sum()
+        # delta absorption term
+        total_term = 0
+        for group in range(self.__group_num):
+            temp = (XS['total'][group,:]-init_XS['total'][group,:])*self.__block_area*adjoint_flux_blockwise[group]*flux_blockwise[group]
+            total_term += temp.sum()
+        # delta scatter term
+        scatter_term = 0
+        for group_in in range(self.__group_num):
+            temp = 0
+            for group_out in range(self.__group_num):
+                temp += (XS['scatter'][group_out,group_in,:]-init_XS['scatter'][group_out,group_in,:])*flux_blockwise[group_out]
+            temp = temp*self.__block_area*adjoint_flux_blockwise[group_in]
+            scatter_term += temp.sum()
+
+
+        # delta fission term
+        fission_term = 0
+        for group_out in range(self.__group_num):
+            temp = 0
+            for group_in in range(self.__group_num):
+                temp += XS['chi'][group_in,:]*adjoint_flux_blockwise[group_in]
+            temp = temp*self.__block_area*flux_blockwise[group_out]*(XS['nu-fission'][group_out,:]-init_XS['nu-fission'][group_out,:])
+            fission_term += temp.sum()
+
+        rho = (-total_term + scatter_term + fission_term)/F
+        return rho
+
+    def __get_dynamics_parameters(self,time_index,fission_blockwise,flux_blockwise,adjoint_flux_blockwise,precursor_conc,XS,rho=0.0):
+        # TODO
+        dynamics_parameters = {}
+        # F
+        F = 0
+        for group in range(self.__group_num):
+            integral = self.__block_area*adjoint_flux_blockwise[group]*fission_blockwise*XS['chi'][group,:]
+            F += integral.sum()
+        
+        if True:
+            # Precursor concentration
+            # Area weighted
+            precursor_average = np.zeros(self.__delay_group_num)
+            for i in range(self.__delay_group_num):
+                temp = 0.0
+                for group in range(self.__group_num):
+                    temp += XS['chi'][group,:]*adjoint_flux_blockwise[group]*self.__precursor_conc[i]*self.__block_area
+                precursor_average[i] = temp.sum()
+            # # Neutron density
+            neutron_density = 0.0
+            for i in range(self.__group_num):
+                temp = adjoint_flux_blockwise[i]*flux_blockwise[i]*self.__block_area/self.__neutron_v[i]
+                neutron_density += temp.sum()
+        else:
+            neutron_density = self.__n_PKE[0]
+            precursor_average = self.__n_PKE[1:(self.__group_num+1)]
+
+        # Neutron generation time
+        neutron_time = 0
+        for group in range(self.__group_num):
+            integral = self.__block_area*adjoint_flux_blockwise[group]*flux_blockwise[group]/self.__neutron_v[group]
+            neutron_time += integral.sum()
+        neutron_time = neutron_time/F
+        # Delay fractions
+        # Delay fractions are spatially independent here
+        delay_fractions = np.zeros(self.__delay_group_num)
+        for delay_group in range(self.__delay_group_num):
+            delay_fractions[delay_group] = self.__delay_beta[delay_group]
+        # Decay constants
+        # TODO
+        # Decay constants are spatially independent here
+        decay_constants = np.zeros(self.__delay_group_num)
+        for delay_group in range(self.__delay_group_num):
+            decay_constants[delay_group] = self.__delay_lambda[delay_group]
+        # # Normalized factor for precursor concentration
+        # total_beta = delay_fractions.sum()
+        # temp = decay_constants*precursor_average
+        # k = (self.__amp_freq-(rho-total_beta)/neutron_time)/(temp.sum()/neutron_density)
+
+        dynamics_parameters['neutron_time'] = neutron_time
+        dynamics_parameters['delay_fractions'] = delay_fractions
+        dynamics_parameters['decay_constants'] = decay_constants
+        dynamics_parameters['neutron_density'] = neutron_density
+        dynamics_parameters['precursor_conc'] = precursor_average
+
+        return dynamics_parameters
+
+    def __get_time_step(self,time_index,current_h,omega_dif_2,tolerance):
+        # Error and optimized time step evaluation
+        error = (current_h**3)*abs(omega_dif_2)/12
+        print('Predicted error: {}'.format(error))
+        optimized_h = np.cbrt(12*tolerance/abs(omega_dif_2))
+        print('Optimized time step: {}'.format(optimized_h))
+
+        final_step = max(self.__min_time_step,min(self.__max_time_step,optimized_h))
+
+        if (final_step+self.__time_steps[time_index-1])>self.__key_time_steps[self.__time_pointer]:
+            final_step = self.__key_time_steps[self.__time_pointer]-self.__time_steps[time_index-1]
+            self.__time_pointer += 1
+        self.__time_steps[time_index] = self.__time_steps[time_index-1]+final_step
+        print('Choosen time step: {}'.format(final_step))
+
+        return final_step
 
     ########################################################################
 
@@ -1391,7 +1586,7 @@ class solver_FDM:
 
     def __save_mat(self,time_index,save_type='SCM',file_name='transient_results'):
         self.__results = {}  
-        if save_type=='SCM':
+        if save_type=='SCM' or save_type=='SCM_adaptive':
             if time_index == 0:
                 self.__results_Q[time_index] = 1
                 self.__results_amp_freq[time_index] = 0.0
@@ -1400,17 +1595,24 @@ class solver_FDM:
                 self.__results_amp_freq[time_index] = self.__amp_freq
             
             for i in range(self.__group_num):
-                self.__results_shape_freq[i][time_index,:] = self.__shape_freq[i]
+                self.__results_shape_freq[i,time_index,:] = self.__shape_freq[i]
             for i in range(self.__delay_group_num):
-                self.__results_precursor_conc[i][time_index,:] = self.__precursor_conc[i]
-                self.__results_precursor_freq[i][time_index,:] = self.__precursor_freq[i]
+                self.__results_precursor_conc[i,time_index,:] = self.__precursor_conc[i]
+                self.__results_precursor_freq[i,time_index,:] = self.__precursor_freq[i]
             
-            self.__results['Time steps'] = self.__time_steps
-            self.__results['Relative power'] = self.__results_Q
-            self.__results['Amplitude frequency'] = self.__results_amp_freq
-            self.__results['Shape frequency'] = self.__results_shape_freq
-            self.__results['Precursor concentration'] = self.__results_precursor_conc
-            self.__results['Precursor frequency'] = self.__results_precursor_freq
+            # if save_type =='SCM':
+            #     self.__results['Time steps'] = self.__time_steps
+            #     self.__results['Relative power'] = self.__results_Q
+            #     self.__results['Amplitude frequency'] = self.__results_amp_freq
+            #     self.__results['Shape frequency'] = self.__results_shape_freq
+            #     self.__results['Precursor concentration'] = self.__results_precursor_conc
+            #     self.__results['Precursor frequency'] = self.__results_precursor_freq
+            self.__results['Time steps'] = self.__time_steps[0:(time_index+1)]
+            self.__results['Relative power'] = self.__results_Q[0:(time_index+1)]
+            self.__results['Amplitude frequency'] = self.__results_amp_freq[0:(time_index+1)]
+            self.__results['Shape frequency'] = self.__results_shape_freq[:,0:(time_index+1),:]
+            self.__results['Precursor concentration'] = self.__results_precursor_conc[:,0:(time_index+1),:]
+            self.__results['Precursor frequency'] = self.__results_precursor_freq[:,0:(time_index+1),:]
 
             # sio.savemat('{}/{}.mat'.format(self.__folder_name,file_name),self.__results)
             np.save('{}/{}.npy'.format(self.__folder_name,file_name),self.__results)
@@ -1427,13 +1629,14 @@ class solver_FDM:
 
             # Normalized
             total_Q = self.__calculate_total_Q(self.__fission_dist_pointwise,dist_type='pointwise')
-            normal_c = 1/total_Q
+            self.__real_total_Q = 1.0
+            normal_c = self.__real_total_Q/total_Q
             self.__fission_dist_pointwise = normal_c*self.__fission_dist_pointwise
             self.__fission_dist_blockwise = normal_c*self.__fission_dist_blockwise
             for group in range(self.__group_num):
                 self.__flux[group] = normal_c*self.__flux[group]*self.__k_init
             print('Total Q (initial): {}'.format(1))
-        
+
         if save_type=='steady' or save_type=='transient':    
             fission_dist_blockwise = np.reshape(self.__fission_dist_blockwise,(self.__block_row,self.__block_col),order='F') 
             np.savetxt('{}/fission_blockwise_{}.asu'.format(self.__folder_name,name),fission_dist_blockwise,fmt="%1.4e")
@@ -1572,7 +1775,7 @@ class solver_FDM:
             k = new_k
 
 
-    def solve_transient_SCM_2(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,k_outer_tolerance=1e-6):
+    def solve_transient_SCM_2(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,k_outer_tolerance=1e-6,call_type='Normal'):
         # Ah~
         # Stiffness confinement method for transient problem
         print('####################################')
@@ -1587,33 +1790,45 @@ class solver_FDM:
         fission_dist_blockwise_last = self.__fission_dist_blockwise.copy()
         # Frequency and concentration
         amp_freq_last = self.__amp_freq
-
-        # # TODO
-        # # Order-2 approximation
-        # if time_index == 1:
-        #     self.__amp_freq_ls[1] = amp_freq_last
-        # else:
-        #     self.__amp_freq_ls[0] = self.__amp_freq_ls[1]
-        #     self.__amp_freq_ls[1] = amp_freq_last
-
-
         shape_freq_last = copy.deepcopy(self.__shape_freq)
         # precursor_freq_last = self.__precursor_freq
         precursor_conc_last = copy.deepcopy(self.__precursor_conc)
+
+        # Amp freq predictor
+        if call_type == 'Normal':
+            self.__amp_freq_predict = amp_freq_last
+        
+        self.__amp_freq = self.__amp_freq_predict
+        # Pre-update
+        if call_type == 'Predict':
+            # Calculate real flux and fission source
+            real_flux = self.__update_flux_real(flux_pointwise=flux_last,amp=self.__amp_freq,amp_last=amp_freq_last,time_interval=time_interval)
+            real_fission_dist_pointwise = self.__flux2Q_pointwise(flux=real_flux)
+            real_fission_dist_blockwise = self.__pointwise2blockwise(real_fission_dist_pointwise)
+            real_total_Q = self.__calculate_total_Q(fission_dist=real_fission_dist_pointwise,dist_type='pointwise')
+
+            # Update precursor frequency and concentration
+            self.__update_conc_exp(flux_blockwise_last,precursor_conc_last,self.__amp_freq,amp_freq_last,self.__shape_freq,shape_freq_last,time_interval)
+            self.__update_precursor_freq(precursor_conc=self.__precursor_conc,fission_blockwise=real_fission_dist_blockwise)
+
+        # If the call type is 'Predictor'
+        # self.__amp_freq_predict will be determined by the PKE solver
+
+
         # Power
         total_Q_normal = self.__calculate_total_Q(fission_dist=fission_dist_pointwise_last,dist_type='pointwise')
         print('Total Q (last): {}'.format(total_Q_normal))
         # total_Q_last = total_Q_normal
         kD_last = 1
         for i in range(max_iter):
-            if i==0:
-                self.__amp_freq = amp_freq_last
-            elif i==1:
-                self.__amp_freq_last = amp_freq_last
-                if amp_freq_last != 0.0:
-                    self.__amp_freq = 1.1*amp_freq_last
-                else:
-                    self.__amp_freq = amp_freq_last + 0.1
+            # if i==0:
+            #     self.__amp_freq = self.__amp_freq_predict
+            # elif i==1:
+            #     self.__amp_freq_last = self.__amp_freq_predict
+            #     if abs(self.__amp_freq_predict)>=1e-7:
+            #         self.__amp_freq = 1.1*self.__amp_freq_predict
+            #     else:
+            #         self.__amp_freq = self.__amp_freq_predict + 0.1
             # Solve within-group equations 
             self.__update_dynamics_XS()
             self.__define_matrix()
@@ -1650,11 +1865,11 @@ class solver_FDM:
                 last_fission = new_fission
                 k = new_k
 
-            if i==0:
-                kD = new_k
-                print('Outer Iteration {}： kD={}'.format(i+1,kD))
-                kD_last = kD
-                continue
+            # if i==0:
+            #     kD = new_k
+            #     print('Outer Iteration {}： kD={}'.format(i+1,kD))
+            #     kD_last = kD
+            #     continue
 
             # Update fission source
             fission_dist_pointwise = self.__flux2Q_pointwise(flux=self.__flux)
@@ -1665,7 +1880,7 @@ class solver_FDM:
             
             # Update amplitude frequency ωT
             # self.__update_amp_freq(kD=kD,fission_dist_pointwise=fission_dist_pointwise,flux_pointwise=self.__flux)
-            self.__update_amp_freq_tang(kD=kD,kD_last=kD_last,amp_freq=self.__amp_freq,amp_freq_last=self.__amp_freq_last)
+            self.__update_amp_freq_secant(kD=kD,kD_last=kD_last,amp_freq=self.__amp_freq,amp_freq_last=self.__amp_freq_last,iter_index=i)
             kD_last = kD
             # Normalized factor 
             normal_C = total_Q_normal/total_Q
@@ -1700,7 +1915,7 @@ class solver_FDM:
             self.__update_conc_exp(flux_blockwise_last,precursor_conc_last,self.__amp_freq,amp_freq_last,self.__shape_freq,shape_freq_last,time_interval)
             self.__update_precursor_freq(precursor_conc=self.__precursor_conc,fission_blockwise=real_fission_dist_blockwise)
             # Stopping criterion
-            if abs(kD-1)<=k_outer_tolerance:
+            if abs(kD-1)<=k_outer_tolerance and i>0:
                 print('Reached the stopping criterion')
                 break          
             self.__flux = copy.deepcopy(normal_flux)
@@ -1716,18 +1931,96 @@ class solver_FDM:
         self.__save_mat(time_index=time_index)
         self.__k = kD
 
+
+
     def solve_transient_SCM_PKE_predictor(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3,k_outer_tolerance=1e-6):
+        # TODO
+        if time_index==1:
+            self.__n_PKE = np.zeros(1+self.__delay_group_num)
+
+        # Predict reactivity with new XS information
+        time_XS = self.__narray_XS()
+        real_flux_blockwise = [None]*self.__group_num
+        adjoint_flux_blockwise = [None]*self.__group_num
+        for group in range(self.__group_num):
+            real_flux_blockwise[group] = self.__pointwise2blockwise(self.__flux[group])
+            adjoint_flux_blockwise[group] = self.__pointwise2blockwise(self.__flux_adjoint[group])
+        predicted_reactivity = self.__get_reactivity(self.__fission_dist_blockwise,real_flux_blockwise,adjoint_flux_blockwise,time_XS,self.__init_XS_narray)
+        print('Predicted reactivity: {}'.format(predicted_reactivity))
 
         # PKE predictor
-        time_start = self.__time_steps[time_interval-1]
-        time_end = self.__time_steps[time_interval]
-        # PKE = solver_PKE(delay_group_num=group,time_start=time_start,time_end=time_end)
-        # PKE.initial_dynamics_parameters(neutron_life=Lambda,delay_beta=beta,delay_lambda=lamb)
-        # PKE.initial_density(neutron_density=1,precursor_conc=C_int)
-        # PKE.time_variant_reactivity(init_rho=0,end_rho=0.0035,variant_type='linear')
-        # omega,mu = PKE.predictor_solve()
+        time_start = self.__time_steps[time_index-1]
+        time_end = self.__time_steps[time_index]
 
-        self.solve_transient_SCM_2(time_index,time_interval,max_iter,k_tolerance,flux_tolerance,k_outer_tolerance)
+        # Get dynamics parameters
+        dynamics_parameters = self.__get_dynamics_parameters(time_index,self.__fission_dist_blockwise,real_flux_blockwise,adjoint_flux_blockwise,self.__precursor_conc,time_XS,self.__results_reactivity[time_index-1])
+
+        # print('Dynamics parameters:')
+        # print(dynamics_parameters)
+
+        # Initilize predicted PKE solver
+        PKE = solver_PKE(delay_group_num=self.__delay_group_num,time_start=time_start,time_end=time_end)
+        PKE.initial_dynamics_parameters(dynamics_parameters['neutron_time'],dynamics_parameters['delay_fractions'],dynamics_parameters['decay_constants'])
+        PKE.initial_density(neutron_density=dynamics_parameters['neutron_density'],precursor_conc=dynamics_parameters['precursor_conc'])
+        PKE.time_variant_reactivity(init_rho=self.__results_reactivity[time_index-1],end_rho=predicted_reactivity,variant_type='linear')
+        results = PKE.predictor_solve()
+        omega = results['omega']
+        self.__amp_freq_predict = 2*omega-self.__amp_freq
+        print('Predicted amplitude frequency: {}'.format(self.__amp_freq_predict))
+
+        # SCM
+        self.solve_transient_SCM_2(time_index,time_interval,max_iter,k_tolerance,flux_tolerance,k_outer_tolerance,'Predictor')
+
+        # Actual reactivity
+        time_XS = self.__narray_XS()
+        real_flux_blockwise = [None]*self.__group_num
+        adjoint_flux_blockwise = [None]*self.__group_num
+        for group in range(self.__group_num):
+            real_flux_blockwise[group] = self.__pointwise2blockwise(self.__flux[group])
+            adjoint_flux_blockwise[group] = self.__pointwise2blockwise(self.__flux_adjoint[group])
+        reactivity = self.__get_reactivity(self.__fission_dist_blockwise,real_flux_blockwise,adjoint_flux_blockwise,time_XS,self.__init_XS_narray)
+        self.__results_reactivity[time_index] = reactivity
+        print('Reactivity: {}'.format(reactivity))
+
+    def evaluate_adaptive_time_step(self,time_index,pre_time_interval,error_tolerance):
+        # time_interval  = self.__max_time_step
+        time_interval = pre_time_interval
+        # TODO
+        if time_index==1:
+            self.__n_PKE = np.zeros(1+self.__delay_group_num)
+
+        # Predict reactivity with new XS information
+        time_XS = self.__narray_XS()
+        real_flux_blockwise = [None]*self.__group_num
+        adjoint_flux_blockwise = [None]*self.__group_num
+        for group in range(self.__group_num):
+            real_flux_blockwise[group] = self.__pointwise2blockwise(self.__flux[group])
+            adjoint_flux_blockwise[group] = self.__pointwise2blockwise(self.__flux_adjoint[group])
+        predicted_reactivity = self.__get_reactivity(self.__fission_dist_blockwise,real_flux_blockwise,adjoint_flux_blockwise,time_XS,self.__init_XS_narray)
+        print('Predicted reactivity (1st): {}'.format(predicted_reactivity))
+
+        # PKE predictor
+        time_start = self.__time_steps[time_index-1]
+        time_end = time_start+time_interval
+
+        # Get dynamics parameters
+        dynamics_parameters = self.__get_dynamics_parameters(time_index,self.__fission_dist_blockwise,real_flux_blockwise,adjoint_flux_blockwise,self.__precursor_conc,time_XS,self.__results_reactivity[time_index-1])
+
+        # Initilize predicted PKE solver
+        PKE = solver_PKE(delay_group_num=self.__delay_group_num,time_start=time_start,time_end=time_end)
+        PKE.initial_dynamics_parameters(dynamics_parameters['neutron_time'],dynamics_parameters['delay_fractions'],dynamics_parameters['decay_constants'])
+        PKE.initial_density(neutron_density=dynamics_parameters['neutron_density'],precursor_conc=dynamics_parameters['precursor_conc'])
+        PKE.time_variant_reactivity(init_rho=self.__results_reactivity[time_index-1],end_rho=predicted_reactivity,variant_type='linear')
+        results = PKE.predictor_solve(time_eval=True)
+        omega = results['omega']
+        omega_dif_2 = results['omega_dif_2'] # For error evaluation
+        self.__amp_freq_predict = 2*omega-self.__amp_freq
+        print('Predicted amplitude frequency (1st): {}'.format(self.__amp_freq_predict))
+
+        # Time step select
+        time_interval = self.__get_time_step(time_index,time_interval,omega_dif_2,error_tolerance)
+
+        return time_interval        
 
     def solve_transient_Implicit_Euler(self,time_index,time_interval,max_iter,k_tolerance=1e-5,flux_tolerance=1e-3):
         # Implicit Euler method (order-1)
@@ -1795,6 +2088,8 @@ class solver_FDM:
             res = self.__shape_freq
         elif var == 'precursor_freq':
             res = self.__precursor_freq
+        elif var == 'reactivity':
+            res = self.__results_reactivity
         elif var == 'block_flux':
             flux_blockwise = [None]*self.__group_num
             for group in range(self.__group_num):
