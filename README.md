@@ -1,4 +1,4 @@
-# FDM-SCM-for-neutron-diffusion-alpha-eigenvalue
+# FDM-SCM-for-neutron-diffusion
 Test code for 2D transient neutron diffusion equation based on the finite difference method (FDM) and stiffness confinement method (SCM). 
 
 Features
