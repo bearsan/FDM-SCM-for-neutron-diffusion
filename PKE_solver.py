@@ -2,6 +2,7 @@ import numpy as np
 import scipy
 from scipy.integrate import solve_ivp
 from numpy.linalg import solve
+from scipy import integrate
 
 '''
 Point kinetics equations solver
@@ -412,7 +413,7 @@ class solver_PKE:
         J_mat = np.zeros((2,2))
         F_vec = np.zeros(2)
         omega_vec = np.zeros(2)
-        quad_coef = np.zeros(3)
+        self.quad_coef = np.zeros(3)
 
         # SCM PKE solving
         for i in range(num_steps):
@@ -459,9 +460,13 @@ class solver_PKE:
                 omega_1 = omega_vec[0]
                 omega = omega_vec[1]
 
-                quad_coef[0] = (2*n0-4*n_1+2*n)/(delta_t**2)
-                quad_coef[1] = (-3*n0+4*n_1-n)/delta_t
-                quad_coef[2] = n0
+                # self.quad_coef[0] = (2*n0-4*n_1+2*n)/(delta_t**2)
+                # self.quad_coef[1] = (-3*n0+4*n_1-n)/delta_t
+                # self.quad_coef[2] = n0
+                self.quad_coef[0] = (2*omega0-4*omega_1+2*omega)/(delta_t**2)
+                self.quad_coef[1] = (-3*omega0+4*omega_1-omega)/delta_t
+                self.quad_coef[2] = omega0
+
                 # Update precursor concentration
                 # for group in range(self.delay_group_num):
                 #     C_1[group] = C0[group]*np.exp(-self.delay_lambda[group]*delta_t/2)+\
@@ -470,26 +475,18 @@ class solver_PKE:
                 #     C[group] = C_1[group]*np.exp(-self.delay_lambda[group]*delta_t/2)+\
                 #         (self.delay_beta[group]/self.neutron_life)*np.exp(-self.delay_lambda[group]*delta_t/2)*n0*\
                 #             (np.exp(average_omega_2*delta_t/2)-np.exp(-self.delay_lambda[group]*delta_t/2))/(average_omega_2+self.delay_lambda[group])
-                # for group in range(self.delay_group_num):
-                #     C_1[group] = C0[group]*np.exp(-self.delay_lambda[group]*delta_t/2)+\
-                #         (self.delay_beta[group]/(self.neutron_life*delta_t/2*self.delay_lambda[group]**2))*\
-                #             (delta_t/2*self.delay_lambda[group]*n_1+n0-n_1+\
-                #                 np.exp(-self.delay_lambda[group]*delta_t/2)*(
-                #                     -delta_t/2*self.delay_lambda[group]*n0-n0+n_1
-                #                 ))
-                #     C[group] = C_1[group]*np.exp(-self.delay_lambda[group]*delta_t/2)+\
-                #         (self.delay_beta[group]/(self.neutron_life*delta_t/2*self.delay_lambda[group]**2))*\
-                #             (delta_t/2*self.delay_lambda[group]*n+n_1-n+\
-                #                 np.exp(-self.delay_lambda[group]*delta_t/2)*(
-                #                     -delta_t/2*self.delay_lambda[group]*n_1-n_1+n
-                #                 ))
+
                 for group in range(self.delay_group_num):
+                    self.compute_group = group
+                    integral_1,err = integrate.quad(self.omega_func,0,delta_t/2)
+                    integral_2,err = integrate.quad(self.omega_func,delta_t/2,delta_t)
+                    integral_total = integral_1+integral_2
                     C_1[group] = C0[group]*np.exp(-self.delay_lambda[group]*delta_t/2)+\
                         (self.delay_beta[group]/self.neutron_life)*np.exp(-self.delay_lambda[group]*delta_t/2)*\
-                            self.quad_exp_int(quad_coef=quad_coef, exp_coef=self.delay_lambda[group], T=delta_t/2)
+                            n0*integral_1
                     C[group] = C0[group]*np.exp(-self.delay_lambda[group]*delta_t)+\
                         (self.delay_beta[group]/self.neutron_life)*np.exp(-self.delay_lambda[group]*delta_t)*\
-                            self.quad_exp_int(quad_coef=quad_coef, exp_coef=self.delay_lambda[group], T=delta_t)
+                            n0*integral_total
 
             # Finish the current step     
             omega_series[i+1] = omega
@@ -678,8 +675,9 @@ class solver_PKE:
 
             return_stuff['omega'] = omega
             return_stuff['omega_dif_2'] = omega_dif_2
-            return_stuff['fine steps'] = time_series
-            return_stuff['neutron density'] = N_series
+            # return_stuff['fine steps'] = time_series
+            return_stuff['neutron density'] = N_series[-1]
+            return_stuff['precursor conc'] = results.y[1:(self.delay_group_num+1),-1]
 
         return return_stuff
 
@@ -697,3 +695,7 @@ class solver_PKE:
         term_3 = (np.exp(T*l)-1)/l
 
         return A*term_1+B*term_2+C*term_3
+
+    def omega_func(self,t):
+        return np.exp(self.quad_coef[0]/3*t**3+self.quad_coef[1]/2*t**2+\
+            self.quad_coef[2]*t+self.delay_lambda[self.compute_group]*t)
